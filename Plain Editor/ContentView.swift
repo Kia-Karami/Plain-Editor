@@ -2,9 +2,38 @@ import SwiftUI
 import CodeEditor
 import AppKit
 import UniformTypeIdentifiers
+import Combine
+
+class ContentViewModel: ObservableObject {
+    @Published var source: String = ""
+    @Published var currentFile: URL?
+    @Published var isDocumentEdited = false
+    
+    func saveCurrentFile() {
+        guard let fileURL = currentFile, isDocumentEdited else { return }
+        
+        do {
+            try source.write(to: fileURL, atomically: true, encoding: .utf8)
+            isDocumentEdited = false
+        } catch {
+            print("Failed to save file: \(error)")
+        }
+    }
+    
+    func loadFile(at url: URL) {
+        do {
+            source = try String(contentsOf: url, encoding: .utf8)
+            currentFile = url
+            isDocumentEdited = false
+        } catch {
+            print("Failed to read file: \(error)")
+        }
+    }
+}
 
 struct ContentView: View {
-    @State private var source: String = "import SwiftUI\n\nstruct MyView: View {\n    var body: some View {\n        Text(\"Hello, World!\")\n    }\n}"
+    @StateObject private var viewModel = ContentViewModel()
+    @State private var isDocumentEdited = false
     @State private var isFilePanelOpen: Bool = false
     @State private var panelWidth: CGFloat = 180
     @State private var isShowingFileImporter = false
@@ -89,7 +118,7 @@ struct ContentView: View {
                                 .background(Color(hex: "#2D2D2D"))
                                 
                                 // File list
-                                FilePanelView(selectedFolder: $selectedFolder, folderName: $folderName, rootItem: $rootItem, selectedItem: $selectedItem)
+                                FilePanelView(selectedFolder: $selectedFolder, folderName: $folderName, rootItem: $rootItem, selectedItem: $selectedItem, viewModel: viewModel)
                                     .frame(width: panelWidth)
                             }
                             .frame(width: panelWidth)
@@ -119,9 +148,26 @@ struct ContentView: View {
                 
                 // Main editor area
                 VStack(spacing: 0) {
-                    CodeEditor(source: $source, language: .swift, theme: .default)
+                    CodeEditor(source: $viewModel.source, language: .swift, theme: .default)
                         .padding(.horizontal)
                         .padding(.top, 40)
+                        .onChange(of: viewModel.source) {
+                            viewModel.isDocumentEdited = true
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                            viewModel.saveCurrentFile()
+                        }
+                        .onAppear {
+                            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                                if event.modifierFlags.contains(.command),
+                                   let chars = event.charactersIgnoringModifiers,
+                                   chars == "s" {
+                                    viewModel.saveCurrentFile()
+                                    return nil
+                                }
+                                return event
+                            }
+                        }
 
                     HStack {
                         // Left group
@@ -223,6 +269,7 @@ struct FilePanelView: View {
     @Binding var rootItem: FileItem?
     @Binding var selectedItem: FileItem?
     @State private var isShowingFileImporter = false
+    @ObservedObject var viewModel: ContentViewModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -232,7 +279,7 @@ struct FilePanelView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let rootItem = rootItem {
-                        FileItemView(item: rootItem, selectedItem: $selectedItem, level: 0)
+                        FileItemView(item: rootItem, selectedItem: $selectedItem, level: 0, viewModel: viewModel)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         Text("No folder selected")
@@ -256,6 +303,48 @@ struct FilePanelView: View {
         @Binding var selectedItem: FileItem?
         let level: Int
         @State private var isHovered = false
+        @State private var showingNewFileAlert = false
+        @State private var showingNewFolderAlert = false
+        @State private var newItemName = ""
+        
+        @ObservedObject var viewModel: ContentViewModel
+        
+        private func createNewFile() {
+            guard !newItemName.isEmpty else { return }
+            let fileURL = item.url.appendingPathComponent(newItemName)
+            
+            do {
+                try "".write(to: fileURL, atomically: true, encoding: .utf8)
+                let newFile = FileItem(name: newItemName, url: fileURL, isDirectory: false)
+                if item.children == nil {
+                    item.children = []
+                }
+                item.children?.append(newFile)
+                item.children?.sort { $0.name < $1.name }
+                newItemName = ""
+            } catch {
+                print("Failed to create file: \(error)")
+            }
+        }
+        
+        private func createNewFolder() {
+            guard !newItemName.isEmpty else { return }
+            let folderURL = item.url.appendingPathComponent(newItemName, isDirectory: true)
+            
+            do {
+                try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+                let newFolder = FileItem(name: newItemName, url: folderURL, isDirectory: true)
+                if item.children == nil {
+                    item.children = []
+                }
+                item.children?.append(newFolder)
+                item.children?.sort { $0.name < $1.name }
+                item.isExpanded = true
+                newItemName = ""
+            } catch {
+                print("Failed to create folder: \(error)")
+            }
+        }
         
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
@@ -311,22 +400,73 @@ struct FilePanelView: View {
                                 item.loadChildren()
                             }
                         }
+                    } else {
+                        // Handle file selection
+                        viewModel.loadFile(at: item.url)
+                        selectedItem = item
                     }
                 }
+                .contextMenu {
+                    Button(action: {
+                        newItemName = ""
+                        showingNewFileAlert = true
+                    }) { Label("New File", systemImage: "doc") }
+
+                    Button(action: {
+                        newItemName = ""
+                        showingNewFolderAlert = true
+                    }) { Label("New Folder", systemImage: "folder.badge.plus") }
+                    Divider()
+                    Button(action: {}) { Label("Reveal in Finder", systemImage: "folder") }
+                    Button(action: {}) { Label("Open in Default App", systemImage: "arrow.up.doc") }
+                    Button(action: {}) { Label("Open in Terminal", systemImage: "terminal") }
+                    Divider()
+                    Button(action: {}) { Label("Find in Folder...", systemImage: "magnifyingglass") }
+                    Divider()
+                    Button(action: {}) { Label("Cut", systemImage: "scissors") }
+                    Button(action: {}) { Label("Copy", systemImage: "doc.on.doc") }
+                    Button(action: {}) { Label("Duplicate", systemImage: "plus.square.on.square") }
+                    Button(action: {}) { Label("Paste", systemImage: "doc.on.clipboard") }
+                    Divider()
+                    Button(action: {}) { Label("Copy Path", systemImage: "doc.on.doc") }
+                    Button(action: {}) { Label("Copy Relative Path", systemImage: "doc.on.doc") }
+                    Divider()
+                    Button(action: {}) { Label("Rename", systemImage: "pencil") }
+                    Divider()
+                    Button(role: .destructive, action: {}) { Label("Trash", systemImage: "trash") }
+                    Button(role: .destructive, action: {}) { Label("Delete", systemImage: "trash.slash") }
+                }
+                .alert("New File", isPresented: $showingNewFileAlert, actions: {
+                    TextField("File name", text: $newItemName)
+                    Button("Create", action: createNewFile)
+                    Button("Cancel", role: .cancel) {}
+                }, message: {
+                    Text("Enter file name:")
+                })
+                .alert("New Folder", isPresented: $showingNewFolderAlert, actions: {
+                    TextField("Folder name", text: $newItemName)
+                    Button("Create", action: createNewFolder)
+                    Button("Cancel", role: .cancel) {}
+                }, message: {
+                    Text("Enter folder name:")
+                })
                 
                 // Child items
                 if item.isExpanded, let children = item.children, !children.isEmpty {
                     ForEach(children, id: \.id) { child in
-                        FileItemView(item: child, selectedItem: $selectedItem, level: level + 1)
+                        FileItemView(item: child, selectedItem: $selectedItem, level: level + 1, viewModel: viewModel)
                     }
                 }
             }
         }
     }
+    
+
 }
 
 #Preview {
     ContentView()
+        .environmentObject(ContentViewModel())
 }
 
 extension Color {
