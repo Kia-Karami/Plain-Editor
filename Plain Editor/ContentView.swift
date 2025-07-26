@@ -332,6 +332,48 @@ struct FilePanelView: View {
             }
         }
         
+        private func iconName(for url: URL, isDirectory: Bool) -> String {
+            guard !isDirectory else { return "folder.fill" }
+            
+            let ext = url.pathExtension.lowercased()
+            
+            // Programming files
+            if ["swift", "py", "js", "jsx", "ts", "tsx", "java", "c", "cpp", "h", "hpp", "m", "mm", "rb", "go", "rs", "kt", "dart"].contains(ext) {
+                return "chevron.left.slash.chevron.right" // Code icon
+            } 
+            // Note files
+            else if ["md", "markdown", "txt", "rtf", "rtfd", "pages"].contains(ext) {
+                return "note.text" // Note icon
+            }
+            // Image files
+            else if ["jpg", "jpeg", "png", "gif", "heic", "tiff", "bmp", "webp"].contains(ext) {
+                return "photo" // Photo icon
+            }
+            // Default document icon
+            return "doc.text"
+        }
+        
+        private func iconColor(for url: URL, isDirectory: Bool) -> Color {
+            if isDirectory { return .gray }
+            
+            let ext = url.pathExtension.lowercased()
+            
+            // Programming files
+            if ["swift", "py", "js", "jsx", "ts", "tsx", "java", "c", "cpp", "h", "hpp", "m", "mm", "rb", "go", "rs", "kt", "dart"].contains(ext) {
+                return .blue
+            } 
+            // Note files
+            else if ["md", "markdown", "txt", "rtf", "rtfd", "pages"].contains(ext) {
+                return .yellow
+            }
+            // Image files
+            else if ["jpg", "jpeg", "png", "gif", "heic", "tiff", "bmp", "webp"].contains(ext) {
+                return .green
+            }
+            // Default color
+            return .white
+        }
+        
         private func createNewFolder() {
             guard !newItemName.isEmpty else { return }
             let folderURL = item.url.appendingPathComponent(newItemName, isDirectory: true)
@@ -374,8 +416,8 @@ struct FilePanelView: View {
                     }
                     
                     // File/Folder icon
-                    Image(systemName: item.isDirectory ? "folder.fill" : "doc.text")
-                        .foregroundColor(item.isDirectory ? .gray : .white)
+                    Image(systemName: iconName(for: item.url, isDirectory: item.isDirectory))
+                        .foregroundColor(iconColor(for: item.url, isDirectory: item.isDirectory))
                         .frame(width: 16, height: 16)
                     
                     // Name
