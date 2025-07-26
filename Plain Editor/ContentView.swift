@@ -138,7 +138,16 @@ struct ContentView: View {
                                     DragGesture()
                                         .onChanged { value in
                                             let newWidth = panelWidth + value.translation.width
-                                            panelWidth = max(120, min(400, newWidth))
+                                            let threshold: CGFloat = 100
+                                            
+                                            if newWidth < threshold {
+                                                withAnimation {
+                                                    isFilePanelOpen = false
+                                                    panelWidth = 180
+                                                }
+                                            } else {
+                                                panelWidth = min(300, newWidth)
+                                            }
                                         }
                                 )
                         }
@@ -174,7 +183,12 @@ struct ContentView: View {
                         HStack(spacing: 24) {
                             Button("Files") {
                                 withAnimation(.easeInOut(duration: 0.3)) {
-                                    isFilePanelOpen.toggle()
+                                    if isFilePanelOpen {
+                                        isFilePanelOpen = false
+                                    } else {
+                                        panelWidth = 180 // Reset to default width
+                                        isFilePanelOpen = true
+                                    }
                                 }
                             }
                             .foregroundColor(.white)
@@ -429,10 +443,15 @@ struct FilePanelView: View {
                     Spacer()
                 }
                 .padding(.leading, CGFloat(level * 16) + 8)
+                .padding(.trailing, 8) // Add right padding to prevent highlight from extending beyond panel
                 .padding(.vertical, 4)
                 .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(isHovered ? Color.white.opacity(0.1) : Color.clear)
+                    GeometryReader { geometry in
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(isHovered ? Color.white.opacity(0.1) : Color.clear)
+                            .frame(width: geometry.size.width - (CGFloat(level * 16) + 8) - 8) // Adjust width to account for padding
+                            .offset(x: -8) // Align with the text
+                    }
                 )
                 .contentShape(Rectangle())
                 .onHover { hovering in
