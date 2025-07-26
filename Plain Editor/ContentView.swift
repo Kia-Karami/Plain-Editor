@@ -210,6 +210,7 @@ class FileItem: Identifiable, ObservableObject {
     let name: String
     let url: URL
     let isDirectory: Bool
+    weak var parent: FileItem?
     @Published var children: [FileItem]?
     @Published var isExpanded = false
     
@@ -239,6 +240,7 @@ class FileItem: Identifiable, ObservableObject {
                     let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
                     print("Found: \(fileURL.lastPathComponent) - \(isDirectory ? "Directory" : "File")")
                     let item = FileItem(name: fileURL.lastPathComponent, url: fileURL, isDirectory: isDirectory)
+                    item.parent = self
                     items.append(item)
                     if isDirectory {
                         item.loadChildren()
@@ -282,9 +284,12 @@ struct FilePanelView: View {
                         FileItemView(item: rootItem, selectedItem: $selectedItem, level: 0, viewModel: viewModel)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
+                        Spacer()
+                            .frame(height: 125)
                         Text("No folder selected")
                             .foregroundColor(.white.opacity(0.7))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        Spacer()
                     }
                 }
                 .padding(.vertical, 4)
@@ -417,24 +422,36 @@ struct FilePanelView: View {
                         showingNewFolderAlert = true
                     }) { Label("New Folder", systemImage: "folder.badge.plus") }
                     Divider()
-                    Button(action: {}) { Label("Reveal in Finder", systemImage: "folder") }
-                    Button(action: {}) { Label("Open in Default App", systemImage: "arrow.up.doc") }
-                    Button(action: {}) { Label("Open in Terminal", systemImage: "terminal") }
+                    Button(action: {
+                        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+                    }) { Label("Reveal in Finder", systemImage: "folder") }
                     Divider()
-                    Button(action: {}) { Label("Find in Folder...", systemImage: "magnifyingglass") }
+                    Button(action: {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(item.url.path, forType: .string)
+                    }) { Label("Copy", systemImage: "doc.on.doc") }
+                    Button(action: {
+                        if let items = NSPasteboard.general.readObjects(forClasses: [NSString.self]) as? [String],
+                           let path = items.first {
+                            let sourceURL = URL(fileURLWithPath: path)
+                            let destinationURL = item.url.appendingPathComponent(sourceURL.lastPathComponent)
+                            try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+                            item.loadChildren()
+                        }
+                    }) { Label("Paste", systemImage: "doc.on.clipboard") }
                     Divider()
-                    Button(action: {}) { Label("Cut", systemImage: "scissors") }
-                    Button(action: {}) { Label("Copy", systemImage: "doc.on.doc") }
-                    Button(action: {}) { Label("Duplicate", systemImage: "plus.square.on.square") }
-                    Button(action: {}) { Label("Paste", systemImage: "doc.on.clipboard") }
-                    Divider()
-                    Button(action: {}) { Label("Copy Path", systemImage: "doc.on.doc") }
-                    Button(action: {}) { Label("Copy Relative Path", systemImage: "doc.on.doc") }
-                    Divider()
-                    Button(action: {}) { Label("Rename", systemImage: "pencil") }
-                    Divider()
-                    Button(role: .destructive, action: {}) { Label("Trash", systemImage: "trash") }
-                    Button(role: .destructive, action: {}) { Label("Delete", systemImage: "trash.slash") }
+                    Button(role: .destructive, action: {
+                        do {
+                            try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+                            if let parent = item.parent {
+                                parent.children?.removeAll { $0.id == item.id }
+                                parent.objectWillChange.send()
+                            }
+                        } catch {
+                            print("Failed to delete item: \(error)")
+                        }
+                    }) { Label("Delete", systemImage: "trash.slash") }
                 }
                 .alert("New File", isPresented: $showingNewFileAlert, actions: {
                     TextField("File name", text: $newItemName)
