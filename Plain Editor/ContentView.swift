@@ -4,6 +4,43 @@ import AppKit
 import UniformTypeIdentifiers
 import Combine
 
+class FileItem: Identifiable, ObservableObject {
+    let id = UUID()
+    let name: String
+    let url: URL
+    let isDirectory: Bool
+    weak var parent: FileItem?
+    @Published var children: [FileItem]?
+    @Published var isExpanded = false
+    
+    init(name: String, url: URL, isDirectory: Bool = false, parent: FileItem? = nil) {
+        self.name = name
+        self.url = url
+        self.isDirectory = isDirectory
+        self.parent = parent
+    }
+    
+    func loadChildren() {
+        guard isDirectory, children == nil else { return }
+        
+        do {
+            let fileURLs = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            
+            children = fileURLs.map { url in
+                let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                return FileItem(name: url.lastPathComponent, url: url, isDirectory: isDirectory, parent: self)
+            }
+        } catch {
+            print("Error loading children: \(error)")
+            children = []
+        }
+    }
+}
+
 class ContentViewModel: ObservableObject {
     @Published var source: String = ""
     @Published var currentFile: URL?
@@ -33,8 +70,12 @@ class ContentViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = ContentViewModel()
+    @StateObject private var terminalManager = TerminalManager()
+    @State private var terminalInput: String = ""
     @State private var isDocumentEdited = false
     @State private var isFilePanelOpen: Bool = false
+    @State private var isTerminalPanelOpen: Bool = false
+    @State private var terminalPanelHeight: CGFloat = 200
     @State private var panelWidth: CGFloat = 180
     @State private var isShowingFileImporter = false
     @State private var selectedFolder: URL?
@@ -178,6 +219,97 @@ struct ContentView: View {
                             }
                         }
 
+                    // Terminal Panel
+                    if isTerminalPanelOpen {
+                        VStack(spacing: 0) {
+                            // Resize handle
+                            Rectangle()
+                                .fill(Color.gray.opacity(0.3))
+                                .frame(height: 4)
+                                .gesture(
+                                    DragGesture()
+                                        .onChanged { gesture in
+                                            let newHeight = max(100, min(500, terminalPanelHeight - gesture.translation.height))
+                                            if newHeight != terminalPanelHeight {
+                                                terminalPanelHeight = newHeight
+                                            }
+                                        }
+                                )
+                                .onHover { hovering in
+                                    if hovering {
+                                        NSCursor.resizeUpDown.push()
+                                    } else {
+                                        NSCursor.pop()
+                                    }
+                                }
+                            HStack {
+                                Text("Terminal")
+                                    .foregroundColor(.white)
+                                    .padding(.leading, 8)
+                                Spacer()
+                                Button(action: {
+                                    isTerminalPanelOpen = false
+                                }) {
+                                    Image(systemName: "xmark")
+                                        .foregroundColor(.white)
+                                        .padding(8)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                            .frame(height: 30)
+                            .background(Color(hex: "#252526"))
+                            
+                            Rectangle()
+                                .fill(Color.gray.opacity(0.3))
+                                .frame(height: 1)
+                            
+                            // Terminal output
+                            ScrollViewReader { scrollView in
+                                ScrollView {
+                                    Text(terminalManager.output)
+                                        .font(.system(size: 13, weight: .regular, design: .monospaced))
+                                        .foregroundColor(.white)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(12)
+                                        .id("terminalOutput")
+                                        .onChange(of: terminalManager.output) {
+                                            withAnimation {
+                                                scrollView.scrollTo("terminalOutput", anchor: .bottom)
+                                            }
+                                        }
+                                }
+                                .background(Color.black)
+                            }
+                            
+                            // Terminal input
+                            HStack(spacing: 4) {
+                                Text("$")
+                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    .foregroundColor(Color(hex: "#4CAF50"))
+                                    .padding(.leading, 12)
+                                
+                                CustomTextField(text: $terminalInput, onCommit: {
+                                    terminalManager.sendCommand(terminalInput)
+                                    terminalInput = ""
+                                })
+                                .onAppear {
+                                    // Focus the text field when the terminal panel opens
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        NSApp.keyWindow?.makeFirstResponder(NSApp.keyWindow?.contentView?.subviews.first { $0 is NSTextField })
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(Color(hex: "#252526"))
+                            .cornerRadius(6)
+                            .padding(.horizontal, 4)
+                            .padding(.bottom, 4)
+                        }
+                        .frame(height: terminalPanelHeight)
+                        .background(Color.black)
+                        .padding(.bottom, 4)
+                    }
+                    
                     HStack {
                         // Left group
                         HStack(spacing: 24) {
@@ -195,6 +327,9 @@ struct ContentView: View {
                             .buttonStyle(PlainButtonStyle())
                             
                             Text("Terminal")
+                                .onTapGesture {
+                                    isTerminalPanelOpen.toggle()
+                                }
                             Text("Debug")
                         }
                         .foregroundColor(.white)
@@ -215,65 +350,73 @@ struct ContentView: View {
             }
         }
     }
+    
+    private func sendTerminalCommand() {
+        terminalManager.sendCommand(terminalInput)
+        terminalInput = ""
+    }
 }
 
-
-
-class FileItem: Identifiable, ObservableObject {
-    let id = UUID()
-    let name: String
-    let url: URL
-    let isDirectory: Bool
-    weak var parent: FileItem?
-    @Published var children: [FileItem]?
-    @Published var isExpanded = false
+// Custom TextField wrapper to handle appearance
+struct CustomTextField: NSViewRepresentable {
+    @Binding var text: String
+    var onCommit: () -> Void
     
-    init(name: String, url: URL, isDirectory: Bool) {
-        self.name = name
-        self.url = url
-        self.isDirectory = isDirectory
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField()
+        textField.delegate = context.coordinator
+        textField.isBordered = false
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.focusRingType = .none
+        textField.backgroundColor = .clear
+        textField.textColor = .white
+        textField.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        
+        // Make the text field first responder when added
+        DispatchQueue.main.async {
+            textField.window?.makeFirstResponder(textField)
+        }
+        
+        return textField
     }
     
-    func loadChildren() {
-        guard isDirectory, children == nil else { return }
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, NSTextFieldDelegate {
+        let parent: CustomTextField
+        private var isCommitting = false
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                let fileURLs = try FileManager.default.contentsOfDirectory(
-                    at: self.url,
-                    includingPropertiesForKeys: [.isDirectoryKey],
-                    options: [.skipsHiddenFiles]
-                )
-                
-                print("Loading contents of: \(self.url.path)")
-                var items = [FileItem]()
-                
-                for fileURL in fileURLs {
-                    let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                    print("Found: \(fileURL.lastPathComponent) - \(isDirectory ? "Directory" : "File")")
-                    let item = FileItem(name: fileURL.lastPathComponent, url: fileURL, isDirectory: isDirectory)
-                    item.parent = self
-                    items.append(item)
-                    if isDirectory {
-                        item.loadChildren()
-                    }
+        init(_ parent: CustomTextField) {
+            self.parent = parent
+        }
+        
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSTextView.insertNewline(_:)) {
+                isCommitting = true
+                parent.onCommit()
+                // Clear the text field after commit
+                DispatchQueue.main.async {
+                    self.parent.text = ""
+                    (control as? NSTextField)?.stringValue = ""
+                    self.isCommitting = false
                 }
-                
-                let sortedItems = items.sorted { $0.name < $1.name }
-                
-                DispatchQueue.main.async { [weak self] in
-                    self?.children = sortedItems
-                    self?.isExpanded = true
-                    print("Loaded \(sortedItems.count) items in \(self?.name ?? "")")
-                }
-                
-            } catch {
-                print("Error loading files: \(error.localizedDescription)")
-                DispatchQueue.main.async { [weak self] in
-                    self?.children = []
-                }
+                return true
+            }
+            return false
+        }
+        
+        func controlTextDidChange(_ obj: Notification) {
+            if !isCommitting, let textField = obj.object as? NSTextField {
+                parent.text = textField.stringValue
             }
         }
     }
