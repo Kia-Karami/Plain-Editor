@@ -287,13 +287,12 @@ struct ContentView: View {
                                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                                     .foregroundColor(Color(hex: "#4CAF50"))
                                     .padding(.leading, 12)
-                                
-                                CustomTextField(text: $terminalInput, onCommit: {
-                                    terminalManager.sendCommand(terminalInput)
-                                    terminalInput = ""
-                                })
-                                .onAppear {
-                                    // Focus the text field when the terminal panel opens
+                                TerminalInputView(text: $terminalInput, onCommit: sendTerminalCommand)
+                                    .onAppear {
+                                        // Focus the text field when the terminal panel opens
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                            NSApp.keyWindow?.makeFirstResponder(NSApp.keyWindow?.contentView?.subviews.first { $0 is NSTextField })
+                                        }
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                         NSApp.keyWindow?.makeFirstResponder(NSApp.keyWindow?.contentView?.subviews.first { $0 is NSTextField })
                                     }
@@ -355,6 +354,176 @@ struct ContentView: View {
         terminalManager.sendCommand(terminalInput)
         terminalInput = ""
     }
+    
+    private struct TerminalInputView: NSViewRepresentable {
+        @Binding var text: String
+        var onCommit: () -> Void
+        
+        func makeNSView(context: Context) -> NSTextField {
+            let textField = NSTextField()
+            textField.delegate = context.coordinator
+            textField.isBordered = false
+            textField.isEditable = true
+            textField.isSelectable = true
+            textField.focusRingType = .none
+            textField.backgroundColor = .clear
+            textField.textColor = .white
+            textField.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            
+            DispatchQueue.main.async {
+                textField.window?.makeFirstResponder(textField)
+            }
+            
+            return textField
+        }
+        
+        func updateNSView(_ nsView: NSTextField, context: Context) {
+            if nsView.stringValue != text {
+                nsView.stringValue = text
+            }
+        }
+        
+        func makeCoordinator() -> Coordinator {
+            Coordinator(self)
+        }
+        
+        class Coordinator: NSObject, NSTextFieldDelegate {
+            let parent: TerminalInputView
+            private var isCommitting = false
+            
+            init(_ parent: TerminalInputView) {
+                self.parent = parent
+            }
+            
+            private func completePath(_ input: String) -> String? {
+                let fileManager = FileManager.default
+                let components = input.components(separatedBy: .whitespaces)
+                let isCommand = components.count > 1 || input.hasSuffix(" ")
+                
+                // If it's a command with arguments, only complete the last part
+                let pathToComplete: String
+                let commandPart: String
+                let currentDir: String
+                
+                if isCommand && components.count > 1 {
+                    commandPart = components.dropLast().joined(separator: " ") + " "
+                    pathToComplete = components.last ?? ""
+                } else if isCommand {
+                    commandPart = input
+                    pathToComplete = ""
+                } else {
+                    commandPart = ""
+                    pathToComplete = input
+                }
+                
+                let currentPath = pathToComplete as NSString
+                let isAbsolute = currentPath.isAbsolutePath
+                let directory: String
+                let prefix: String
+                
+                if isAbsolute {
+                    directory = currentPath.deletingLastPathComponent
+                    prefix = currentPath.lastPathComponent
+                    currentDir = "/"
+                } else {
+                    currentDir = fileManager.currentDirectoryPath
+                    if currentPath.length > 1 {
+                        directory = (currentDir as NSString).appendingPathComponent(currentPath.deletingLastPathComponent)
+                        prefix = currentPath.lastPathComponent
+                    } else {
+                        directory = currentDir
+                        prefix = pathToComplete
+                    }
+                }
+                
+                guard let contents = try? fileManager.contentsOfDirectory(atPath: directory) else {
+                    return nil
+                }
+                
+                let matches = contents.filter { $0.hasPrefix(prefix) }
+                    .sorted()
+                
+                if matches.isEmpty {
+                    return nil
+                } else if matches.count == 1 {
+                    let match = matches[0]
+                    let fullPath = (directory as NSString).appendingPathComponent(match)
+                    var isDir: ObjCBool = false
+                    _ = fileManager.fileExists(atPath: fullPath, isDirectory: &isDir)
+                    let suffix = isDir.boolValue ? "/" : " "
+                    
+                    let completedPath: String
+                    if isAbsolute {
+                        completedPath = fullPath + suffix
+                    } else {
+                        let relativePath = (match as NSString).appendingPathComponent(suffix)
+                        completedPath = (currentPath.deletingLastPathComponent as NSString).appendingPathComponent(relativePath)
+                    }
+                    
+                    // If it was a command with arguments, prepend the command part back
+                    if !commandPart.isEmpty {
+                        return commandPart + completedPath
+                    }
+                    return completedPath
+                } else {
+                    var commonPrefix = matches[0]
+                    for match in matches.dropFirst() {
+                        commonPrefix = commonPrefix.commonPrefix(with: match)
+                        if commonPrefix.isEmpty { break }
+                    }
+                    
+                    if commonPrefix.count > prefix.count {
+                        let fullPath = (directory as NSString).appendingPathComponent(commonPrefix)
+                        let completedPath = isAbsolute ? 
+                            fullPath : 
+                            (currentPath.deletingLastPathComponent as NSString).appendingPathComponent(commonPrefix)
+                        
+                        // If it was a command with arguments, prepend the command part back
+                        if !commandPart.isEmpty {
+                            return commandPart + completedPath
+                        }
+                        return completedPath
+                    }
+                    
+                    let matchesStr = matches.joined(separator: "\n")
+                    DispatchQueue.main.async {
+                        print("\n\(matchesStr)")
+                    }
+                    return nil
+                }
+            }
+            
+            func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+                if commandSelector == #selector(NSTextView.insertTab(_:)) {
+                    if let textField = control as? NSTextField {
+                        let currentText = textField.stringValue
+                        if let completion = completePath(currentText) {
+                            textField.stringValue = completion
+                            parent.text = completion
+                            return true
+                        }
+                    }
+                    return true
+                } else if commandSelector == #selector(NSTextView.insertNewline(_:)) {
+                    isCommitting = true
+                    parent.onCommit()
+                    DispatchQueue.main.async {
+                        self.parent.text = ""
+                        (control as? NSTextField)?.stringValue = ""
+                        self.isCommitting = false
+                    }
+                    return true
+                }
+                return false
+            }
+            
+            func controlTextDidChange(_ obj: Notification) {
+                if !isCommitting, let textField = obj.object as? NSTextField {
+                    parent.text = textField.stringValue
+                }
+            }
+        }
+    }
 }
 
 // Custom TextField wrapper to handle appearance
@@ -394,16 +563,101 @@ struct CustomTextField: NSViewRepresentable {
     class Coordinator: NSObject, NSTextFieldDelegate {
         let parent: CustomTextField
         private var isCommitting = false
+        private var lastCompletionPrefix: String = ""
+        private var lastCompletionMatches: [String] = []
+        private var lastCompletionIndex: Int = 0
         
         init(_ parent: CustomTextField) {
             self.parent = parent
         }
         
+        private func completePath(_ input: String) -> String? {
+            let fileManager = FileManager.default
+            let currentPath = input as NSString
+            let isAbsolute = currentPath.isAbsolutePath
+            let directory: String
+            let prefix: String
+            
+            // Get directory and prefix
+            if isAbsolute {
+                directory = currentPath.deletingLastPathComponent
+                prefix = currentPath.lastPathComponent
+            } else {
+                let currentDir = fileManager.currentDirectoryPath
+                if currentPath.length > 1 {
+                    directory = (currentDir as NSString).appendingPathComponent(currentPath.deletingLastPathComponent)
+                    prefix = currentPath.lastPathComponent
+                } else {
+                    directory = currentDir
+                    prefix = input
+                }
+            }
+            
+            // Get directory contents
+            guard let contents = try? fileManager.contentsOfDirectory(atPath: directory) else {
+                return nil
+            }
+            
+            // Filter and sort matches
+            let matches = contents.filter { $0.hasPrefix(prefix) }
+                .sorted()
+            
+            if matches.isEmpty {
+                return nil
+            } else if matches.count == 1 {
+                let match = matches[0]
+                let fullPath = (directory as NSString).appendingPathComponent(match)
+                var isDir: ObjCBool = false
+                _ = fileManager.fileExists(atPath: fullPath, isDirectory: &isDir)
+                let suffix = isDir.boolValue ? "/" : " "
+                
+                if isAbsolute {
+                    return fullPath + suffix
+                } else {
+                    let relativePath = (match as NSString).appendingPathComponent(suffix)
+                    return (currentPath.deletingLastPathComponent as NSString).appendingPathComponent(relativePath)
+                }
+            } else {
+                // Find common prefix
+                var commonPrefix = matches[0]
+                for match in matches.dropFirst() {
+                    commonPrefix = commonPrefix.commonPrefix(with: match)
+                    if commonPrefix.isEmpty { break }
+                }
+                
+                // If common prefix is longer than current prefix, complete to it
+                if commonPrefix.count > prefix.count {
+                    let fullPath = (directory as NSString).appendingPathComponent(commonPrefix)
+                    if isAbsolute {
+                        return fullPath
+                    } else {
+                        return (currentPath.deletingLastPathComponent as NSString).appendingPathComponent(commonPrefix)
+                    }
+                }
+                
+                // Show all matches
+                let matchesStr = matches.joined(separator: "\n")
+                DispatchQueue.main.async {
+                    print("\n\(matchesStr)")
+                }
+                return nil
+            }
+        }
+        
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            if commandSelector == #selector(NSTextView.insertNewline(_:)) {
+            if commandSelector == #selector(NSTextView.insertTab(_:)) {
+                if let textField = control as? NSTextField {
+                    let currentText = textField.stringValue
+                    if let completion = completePath(currentText) {
+                        textField.stringValue = completion
+                        parent.text = completion
+                        return true
+                    }
+                }
+                return true
+            } else if commandSelector == #selector(NSTextView.insertNewline(_:)) {
                 isCommitting = true
                 parent.onCommit()
-                // Clear the text field after commit
                 DispatchQueue.main.async {
                     self.parent.text = ""
                     (control as? NSTextField)?.stringValue = ""
